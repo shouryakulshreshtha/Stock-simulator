@@ -1,0 +1,5 @@
+build/
+*.exe
+*.o
+events.csv
+web/chart_data.js

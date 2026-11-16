@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StockSim live chart</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #171d25; --line: #263040; --text: #e6e9ee; --muted: #8a96a6;
+    --price: #4aa3ff; --ref: #9aa4b2; --vol: #3a4a60; --up: #3ecf8e; --down: #ff6b6b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f5f7fa; --panel: #ffffff; --line: #dde3ea; --text: #1b2430; --muted: #5d6b7c;
+            --price: #1769d1; --ref: #7b8794; --vol: #c3cedb; --up: #12a05f; --down: #d63b3b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 12px; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px;
+          border: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .live .dot { background: var(--up); }
+  .stale .dot { background: var(--down); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+  .card .k { color: var(--muted); font-size: 12px; }
+  .card .v { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+  .tab { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+         padding: 6px 14px; cursor: pointer; font: inherit; }
+  .tab[aria-selected="true"] { border-color: var(--price); color: var(--price); font-weight: 600; }
+  .chart { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px; position: relative; }
+  canvas { width: 100%; height: 420px; display: block; }
+  .legend { display: flex; gap: 16px; padding: 4px 8px 0; color: var(--muted); font-size: 12px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 18px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 6px; }
+  .up { color: var(--up); } .down { color: var(--down); }
+  .note { color: var(--muted); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>StockSim live chart</h1>
+    <span id="status" class="pill"><span class="dot"></span><span id="statusText">waiting for chart_data.js</span></span>
+    <span class="meta">replay day <b id="replay">-</b> &middot; updated <span id="updated">-</span></span>
+  </header>
+
+  <div class="cards" id="global"></div>
+  <div class="tabs" id="tabs" role="tablist"></div>
+  <div class="cards" id="symbolCards"></div>
+
+  <div class="chart">
+    <canvas id="canvas" aria-label="Price and volume chart"></canvas>
+    <div class="legend">
+      <span><i style="border-color: var(--price)"></i>traded price (last trade in each 2 s)</span>
+      <span><i style="border-color: var(--ref); border-top-style: dashed"></i>reference price (replayed from the data)</span>
+      <span><i style="border-color: var(--vol); border-top-width: 6px"></i>volume</span>
+    </div>
+  </div>
+  <p class="note">This page reads <code>chart_data.js</code>, which the C++ program rewrites every second. Keep the program running.</p>
+</div>
+
+<script>
+let selected = null;      // symbol shown
+let hoverIndex = -1;      // point under the mouse
+let lastUpdated = null;
+let lastChange = 0;
+
+const $ = id => document.getElementById(id);
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const num = (n, d = 2) => Number(n).toLocaleString('en-IN', { minimumFractionDigits: d, maximumFractionDigits: d });
+
+function card(k, v, cls = '') { return `<div class="card"><div class="k">${k}</div><div class="v ${cls}">${v}</div></div>`; }
+
+function render() {
+  const D = window.STOCKSIM;
+  if (!D) return;
+  const names = Object.keys(D.symbols);
+  if (!selected || !D.symbols[selected]) selected = names[0];
+
+  $('replay').textContent = D.replay || '-';
+  $('updated').textContent = D.updated;
+  $('global').innerHTML =
+    card('orders accepted', num(D.stats.orders, 0)) + card('trades', num(D.stats.trades, 0)) +
+    card('rejected', num(D.stats.rejected, 0)) + card('cancels', num(D.stats.cancels, 0)) +
+    card('orders / second', num(D.stats.ordersPerSec, 1));
+
+  $('tabs').innerHTML = names.map(n =>
+    `<button class="tab" role="tab" aria-selected="${n === selected}" data-sym="${n}">${n}</button>`).join('');
+  document.querySelectorAll('.tab').forEach(b => b.onclick = () => { selected = b.dataset.sym; hoverIndex = -1; render(); });
+
+  const s = D.symbols[selected];
+  const change = s.open > 0 ? (s.last / s.open - 1) * 100 : 0;
+  $('symbolCards').innerHTML =
+    card('last traded', num(s.last)) + card('reference', num(s.ref)) +
+    card('change since start', (change >= 0 ? '+' : '') + num(change) + '%', change >= 0 ? 'up' : 'down') +
+    card('volume', num(s.volume, 0)) + card('trades', num(s.trades, 0));
+
+  drawChart(s);
+}
+
+function drawChart(s) {
+  const canvas = $('canvas');
+  const ratio = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = Math.round(w * ratio); canvas.height = Math.round(h * ratio);
+  const g = canvas.getContext('2d');
+  g.setTransform(ratio, 0, 0, ratio, 0, 0);
+  g.clearRect(0, 0, w, h);
+
+  const L = 64, R = 14, T = 12, B = 26;
+  const plotW = w - L - R, plotH = h - T - B;
+  const priceH = plotH * 0.74, gap = 10, volTop = T + priceH + gap, volH = plotH - priceH - gap;
+  const n = s.price.length;
+  if (n < 2) { g.fillStyle = css('--muted'); g.fillText('collecting data...', L, T + 20); return; }
+
+  const all = s.price.concat(s.reference);
+  let lo = Math.min(...all), hi = Math.max(...all);
+  const pad = (hi - lo) * 0.08 || hi * 0.002; lo -= pad; hi += pad;
+  const X = i => L + (plotW * (i + 0.5)) / n;   // half a slot of padding so the first and last bars stay inside the plot
+  const Y = p => T + priceH - ((p - lo) / (hi - lo)) * priceH;
+
+  g.font = '11px system-ui, sans-serif'; g.textBaseline = 'middle';
+  g.strokeStyle = css('--line'); g.fillStyle = css('--muted'); g.lineWidth = 1;
+  for (let k = 0; k <= 4; k++) {                       // price grid
+    const p = lo + ((hi - lo) * k) / 4, y = Y(p);
+    g.beginPath(); g.moveTo(L, y); g.lineTo(L + plotW, y); g.stroke();
+    g.textAlign = 'right'; g.fillText(num(p), L - 8, y);
+  }
+  g.textAlign = 'center'; g.textBaseline = 'top';       // time labels
+  const every = Math.max(1, Math.round(n / 6));
+  for (let i = 0; i < n; i += every) g.fillText(s.labels[i], Math.min(Math.max(X(i), L + 24), L + plotW - 24), h - B + 8);
+
+  const maxVol = Math.max(1, ...s.vol);                 // volume bars
+  const bw = Math.max(1, plotW / n - 1);
+  g.fillStyle = css('--vol');
+  s.vol.forEach((v, i) => { const bh = (v / maxVol) * volH; g.fillRect(X(i) - bw / 2, volTop + volH - bh, bw, bh); });
+
+  g.lineJoin = 'round';
+  g.setLineDash([5, 4]); g.strokeStyle = css('--ref'); g.lineWidth = 1.5;   // reference price
+  g.beginPath(); s.reference.forEach((p, i) => i ? g.lineTo(X(i), Y(p)) : g.moveTo(X(i), Y(p))); g.stroke();
+  g.setLineDash([]); g.strokeStyle = css('--price'); g.lineWidth = 2;        // traded price
+  g.beginPath(); s.price.forEach((p, i) => i ? g.lineTo(X(i), Y(p)) : g.moveTo(X(i), Y(p))); g.stroke();
+
+  if (hoverIndex >= 0 && hoverIndex < n) {                                    // crosshair
+    const x = X(hoverIndex);
+    g.strokeStyle = css('--muted'); g.lineWidth = 1;
+    g.beginPath(); g.moveTo(x, T); g.lineTo(x, T + plotH); g.stroke();
+    g.fillStyle = css('--price'); g.beginPath(); g.arc(x, Y(s.price[hoverIndex]), 4, 0, 6.3); g.fill();
+    const text = `${s.labels[hoverIndex]}   price ${num(s.price[hoverIndex])}   ref ${num(s.reference[hoverIndex])}   vol ${s.vol[hoverIndex]}`;
+    g.font = '12px system-ui, sans-serif'; g.textAlign = 'left'; g.textBaseline = 'top';
+    const tw = g.measureText(text).width + 16, bx = Math.min(Math.max(x - tw / 2, L), L + plotW - tw);
+    g.fillStyle = css('--bg'); g.fillRect(bx, T + 2, tw, 22);
+    g.strokeStyle = css('--line'); g.strokeRect(bx, T + 2, tw, 22);
+    g.fillStyle = css('--text'); g.fillText(text, bx + 8, T + 7);
+  }
+}
+
+$('canvas').addEventListener('mousemove', e => {
+  const D = window.STOCKSIM; if (!D || !selected) return;
+  const rect = e.target.getBoundingClientRect();
+  const n = D.symbols[selected].price.length;
+  const plotW = rect.width - 64 - 14;
+  hoverIndex = Math.min(n - 1, Math.max(0, Math.floor(((e.clientX - rect.left - 64) / plotW) * n)));
+  drawChart(D.symbols[selected]);
+});
+$('canvas').addEventListener('mouseleave', () => { hoverIndex = -1; const D = window.STOCKSIM; if (D) drawChart(D.symbols[selected]); });
+window.addEventListener('resize', () => { const D = window.STOCKSIM; if (D && selected) drawChart(D.symbols[selected]); });
+
+function setStatus(live, text) {
+  $('status').className = 'pill ' + (live ? 'live' : 'stale');
+  $('statusText').textContent = text;
+}
+
+// Every second: load chart_data.js again (a new <script> tag with a changing URL, so the browser does not cache it).
+function poll() {
+  const tag = document.createElement('script');
+  tag.src = 'chart_data.js?t=' + Date.now();
+  tag.onload = () => {
+    const D = window.STOCKSIM;
+    if (D && D.updated !== lastUpdated) { lastUpdated = D.updated; lastChange = Date.now(); }
+    render();
+    tag.remove();
+  };
+  tag.onerror = () => { tag.remove(); };
+  document.head.appendChild(tag);
+  const age = Date.now() - lastChange;
+  if (lastChange === 0) setStatus(false, 'waiting for chart_data.js');
+  else if (age > 4000) setStatus(false, 'no new data: is the program still running?');
+  else setStatus(true, 'live');
+}
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>
